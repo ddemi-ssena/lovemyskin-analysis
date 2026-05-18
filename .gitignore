@@ -1,0 +1,25 @@
+# Sanal ortam
+venv/
+
+# Dataset ve modeller — bunlar cok buyuk
+data/
+models/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Log dosyalari
+*.log
+
+# Gecici dosyalar
+*.tmp
+*.bak
