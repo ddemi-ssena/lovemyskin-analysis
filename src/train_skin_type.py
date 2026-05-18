@@ -1,18 +1,15 @@
 import os, cv2, torch
 import numpy as np
-import pandas as pd
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import timm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from sklearn.model_selection import train_test_split
 
-IMG_DIR    = r"data\Skin types.multiclass\train"
-CSV_PATH   = r"data\Skin types.multiclass\train\_classes.csv"
+BASE_DIR    = r"data\skin_type_classification_dataset"
 NUM_CLASSES = 4
-BATCH_SIZE  = 8
-EPOCHS      = 30
+BATCH_SIZE  = 16
+EPOCHS      = 20
 LR          = 1e-4
 IMG_SIZE    = 224
 DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -20,16 +17,11 @@ CLASS_NAMES = ["combination", "dry", "normal", "oily"]
 
 print(f"Device: {DEVICE}")
 
-# Train transform'u guclendir
 train_transform = A.Compose([
     A.Resize(IMG_SIZE, IMG_SIZE),
     A.HorizontalFlip(p=0.5),
-    A.VerticalFlip(p=0.2),
-    A.RandomBrightnessContrast(p=0.5),
-    A.Rotate(limit=30, p=0.5),
-    A.HueSaturationValue(p=0.3),
-    A.GaussNoise(p=0.2),
-    A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.3),
+    A.RandomBrightnessContrast(p=0.3),
+    A.Rotate(limit=15, p=0.3),
     A.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]),
     ToTensorV2()
 ])
@@ -41,29 +33,27 @@ val_transform = A.Compose([
 ])
 
 class SkinTypeDataset(Dataset):
-    def __init__(self, df, img_dir, transform):
-        self.df        = df.reset_index(drop=True)
-        self.img_dir   = img_dir
+    def __init__(self, split, transform):
         self.transform = transform
+        self.samples   = []
+        split_dir = os.path.join(BASE_DIR, split)
+        for label_idx, cls in enumerate(CLASS_NAMES):
+            cls_dir = os.path.join(split_dir, cls)
+            if not os.path.exists(cls_dir):
+                continue
+            for fname in os.listdir(cls_dir):
+                if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    self.samples.append((os.path.join(cls_dir, fname), label_idx))
 
     def __len__(self):
-        return len(self.df)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        row   = self.df.iloc[idx]
-        fname = row["filename"]
-        label = int(np.argmax(row[CLASS_NAMES].values.astype(float)))
-    
-        # Unicode path sorunu icin
-        img_path = os.path.join(self.img_dir, fname)
+        path, label = self.samples[idx]
         try:
-            img = cv2.imdecode(
-                np.fromfile(img_path, dtype=np.uint8), 
-                cv2.IMREAD_COLOR
-            )
+            img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         except:
             img = None
-        
         if img is None:
             img = np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.uint8)
         else:
@@ -71,26 +61,25 @@ class SkinTypeDataset(Dataset):
         aug = self.transform(image=img)["image"]
         return aug, label
 
-df = pd.read_csv(CSV_PATH)
-train_df, val_df = train_test_split(df, test_size=0.2, random_state=42,
-                                     stratify=df[CLASS_NAMES].idxmax(axis=1))
-
-train_ds = SkinTypeDataset(train_df, IMG_DIR, train_transform)
-val_ds   = SkinTypeDataset(val_df,   IMG_DIR, val_transform)
+train_ds = SkinTypeDataset("train", train_transform)
+val_ds   = SkinTypeDataset("valid", val_transform)
 train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=0)
 val_dl   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
 print(f"Train: {len(train_ds)} | Val: {len(val_ds)}")
 
-# Modele dropout ekle
-model = timm.create_model("efficientnet_b0", pretrained=True, 
-                           num_classes=NUM_CLASSES, drop_rate=0.4)
+model = timm.create_model("efficientnet_b0", pretrained=True, num_classes=NUM_CLASSES)
 model = model.to(DEVICE)
 
-# Learning rate'i duşur, weight decay ekle
-optimizer = torch.optim.Adam(model.parameters(), lr=3e-5, weight_decay=1e-4)
+# Weighted loss
+counts  = torch.tensor([248, 833, 976, 815], dtype=torch.float)
+weights = (1.0 / counts)
+weights = weights / weights.sum()
+weights = weights.to(DEVICE)
+criterion = nn.CrossEntropyLoss(weight=weights)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
-criterion = nn.CrossEntropyLoss()
 scaler    = torch.amp.GradScaler("cuda")
 
 best_val_acc = 0.0
